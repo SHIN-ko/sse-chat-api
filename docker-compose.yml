@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+  llama_cpp:
+    image: ghcr.io/ggml-org/llama.cpp:server
+    container_name: llama_cpp
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/models:ro
+    command:
+      - -m
+      - /models/llama-3.1-7b-instruct.Q4_K_M.gguf   # ← 여기에 넣은 gguf 파일명으로 바꾸세요
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --alias
+      - local-llama
+
+  api:
+    build: ./app
+    container_name: demo_api
+    environment:
+      # llama.cpp OpenAI 호환 엔드포인트 (서비스 이름으로 접근)
+      OPENAI_BASE_URL: http://llama_cpp:8000/v1
+      MODEL_NAME: local-llama
+    ports:
+      - "8080:8080"
+    depends_on:
+      - llama_cpp
