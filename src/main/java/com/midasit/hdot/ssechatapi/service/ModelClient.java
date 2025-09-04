@@ -9,6 +9,7 @@ import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 @Component
 public class ModelClient {
@@ -16,60 +17,72 @@ public class ModelClient {
     private final WebClient webClient;
 
     @Value("${app.model.base-url}")
-    private String baseUrl;               // 예: http://localhost:8000/v1
+    private String baseUrl;
 
     @Value("${app.model.endpoint:/chat/completions}")
-    private String endpoint;              // 예: /chat/completions
+    private String endpoint;
 
     @Value("${app.model.name}")
-    private String modelName;             // 예: local-llama
+    private String modelName;
 
     @Value("${app.model.api-key:}")
     private String apiKey;
+
+    @Value("${app.model.temperature:0.2}")
+    private double temperature;
 
     public ModelClient(WebClient webClient) {
         this.webClient = webClient;
     }
 
-    public Flux<String> streamDeltas(String prompt) {
-        var messages = new JSONArray()
-                .put(new JSONObject().put("role", "user").put("content", prompt));
+    private String url() {
+        // 최종 호출 URL = base-url + endpoint
+        return (baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length()-1) : baseUrl) + endpoint;
+    }
+
+    public Flux<String> streamDeltas(String system, String userPrompt) {
+        var messages = new JSONArray();
+        if (system != null && !system.isBlank()) {
+            messages.put(new JSONObject().put("role", "system").put("content", system));
+        }
+        messages.put(new JSONObject().put("role", "user").put("content", userPrompt));
 
         var body = new JSONObject()
                 .put("model", modelName)
                 .put("stream", true)
+                .put("temperature", temperature)
                 .put("messages", messages);
 
-        // llama.cpp OpenAI-compat: /v1/chat/completions (SSE: data: ... , [DONE] 종료)
         return webClient.post()
-                .uri(baseUrl + endpoint)
+                .uri(url())
                 .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
-                .header(HttpHeaders.ACCEPT, "text/event-stream")   // 스트리밍 힌트
-                .headers(h -> {
-                    if (apiKey != null && !apiKey.isBlank()) {
-                        h.setBearerAuth(apiKey);
-                    }
-                })
+                .headers(h -> { if (!apiKey.isBlank()) h.setBearerAuth(apiKey); })
                 .bodyValue(body.toString())
                 .retrieve()
-                .bodyToFlux(String.class)               // 업스트림 SSE 원문 청크
+                .bodyToFlux(String.class)                 // OpenAI 호환 SSE 원문을 라인 단위로 파싱
                 .flatMap(chunk -> Flux.fromArray(chunk.split("\\r?\\n")))
                 .filter(line -> line.startsWith("data: "))
-                .map(line -> line.substring(6).trim())  // "data: " 제거
+                .map(line -> line.substring(6).trim())
                 .takeUntil(payload -> payload.equals("[DONE]"))
                 .filter(payload -> !payload.equals("[DONE]"))
                 .map(payload -> {
                     try {
                         var obj = new JSONObject(payload);
-                        var choices = obj.getJSONArray("choices");
-                        if (choices.isEmpty()) return "";
-                        var delta = choices.getJSONObject(0).optJSONObject("delta");
-                        if (delta == null) return "";
-                        return delta.optString("content", "");
+                        return obj.getJSONArray("choices")
+                                .getJSONObject(0)
+                                .getJSONObject("delta")
+                                .optString("content", "");
                     } catch (Exception e) {
                         return "";
                     }
                 })
                 .filter(s -> !s.isEmpty());
+    }
+
+    public Mono<String> complete(String system, String userPrompt) {
+        // 스트림을 모두 모아 최종 문자열로
+        return streamDeltas(system, userPrompt)
+                .reduce(new StringBuilder(), StringBuilder::append)
+                .map(StringBuilder::toString);
     }
 }
