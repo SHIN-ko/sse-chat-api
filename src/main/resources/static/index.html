@@ -75,70 +75,57 @@
     <pre id="out" class="mono"></pre>
     <div class="status mono small" id="stats"></div>
 </div>
-
 <script>
     (() => {
         const $ = (s) => document.querySelector(s);
-        const systemEl = $('#system');
-        const userEl = $('#user');
-        const outEl = $('#out');
-        const statusEl = $('#status');
-        const statsEl = $('#stats');
-        const runBtn = $('#run');
-        const stopBtn = $('#stop');
-        const copyBtn = $('#copy');
-        const clearBtn = $('#clear');
-        const downloadBtn = $('#download');
-        const autoscrollEl = $('#autoscroll');
-        const appendNewlineEl = $('#appendNewline');
+        const systemEl = $('#system'), userEl = $('#user');
+        const outEl = $('#out'), statusEl = $('#status'), statsEl = $('#stats');
+        const runBtn = $('#run'), stopBtn = $('#stop');
+        const copyBtn = $('#copy'), clearBtn = $('#clear'), downloadBtn = $('#download');
+        const autoscrollEl = $('#autoscroll'), appendNewlineEl = $('#appendNewline');
 
-        let es = null;               // EventSource 핸들
-        let abortController = null;  // fetch POST 스트림 중단용
-        let startedAt = 0;
-        let chunkCount = 0;
-        let charCount = 0;
+        let es = null;
+        let abortController = null;
+        let startedAt = 0, chunkCount = 0, charCount = 0;
 
-        const setStatus = (s) => { statusEl.textContent = s; };
+        const setStatus = (s) => statusEl.textContent = s;
         const resetStats = () => { startedAt = Date.now(); chunkCount = 0; charCount = 0; statsTick(); };
         const statsTick = () => {
             const sec = Math.max(0.001, (Date.now() - startedAt) / 1000);
             statsEl.textContent = `chunks=${chunkCount} | chars=${charCount} | elapsed=${sec.toFixed(2)}s | cps≈${(charCount/sec).toFixed(1)}`;
         };
-        const append = (text) => {
-            outEl.textContent += text;
-            charCount += text.length;
-            if (autoscrollEl.checked) outEl.scrollTop = outEl.scrollHeight;
-            statsTick();
-        };
-        const done = () => {
-            setStatus('done');
-            runBtn.disabled = false; stopBtn.disabled = true;
-            if (appendNewlineEl.checked) append('\n');
-        };
-        const onError = (err) => {
-            setStatus(`error: ${String(err)}`);
-            runBtn.disabled = false; stopBtn.disabled = true;
-        };
+        const append = (t) => { outEl.textContent += t; charCount += t.length; if (autoscrollEl.checked) outEl.scrollTop = outEl.scrollHeight; statsTick(); };
+        const finish = (label='done') => { setStatus(label); runBtn.disabled = false; stopBtn.disabled = true; if (appendNewlineEl.checked) append('\n'); };
+        const onError = (err) => { console.error('[UI] error:', err); setStatus(`error: ${String(err)}`); runBtn.disabled = false; stopBtn.disabled = true; };
 
         clearBtn.onclick = () => { outEl.textContent = ''; setStatus('idle'); statsEl.textContent=''; };
-        copyBtn.onclick = async () => {
-            try { await navigator.clipboard.writeText(outEl.textContent); setStatus('copied'); }
-            catch (e) { setStatus('copy failed'); }
-        };
-        downloadBtn.onclick = () => {
-            const blob = new Blob([outEl.textContent], {type: 'text/plain;charset=utf-8'});
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = `chat-${new Date().toISOString().replace(/[:.]/g,'')}.txt`;
-            a.click();
-            URL.revokeObjectURL(a.href);
-        };
+        copyBtn.onclick = async () => { try { await navigator.clipboard.writeText(outEl.textContent); setStatus('copied'); } catch { setStatus('copy failed'); } };
+        downloadBtn.onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([outEl.textContent], {type:'text/plain'})); a.download = `chat-${new Date().toISOString().replace(/[:.]/g,'')}.txt`; a.click(); URL.revokeObjectURL(a.href); };
 
         stopBtn.onclick = () => {
             if (es) { es.close(); es = null; }
             if (abortController) { abortController.abort(); abortController = null; }
-            done();
+            finish('stopped');
         };
+
+        // SSE 이벤트 묶음 파서 (여러 data: 라인 결합)
+        function consumeSSEBuffer(buffer, onEvent) {
+            let idx;
+            while ((idx = buffer.indexOf('\n\n')) !== -1) {
+                const raw = buffer.slice(0, idx);
+                buffer = buffer.slice(idx + 2);
+                const lines = raw.split(/\r?\n/);
+                let ev = 'message';
+                const dataParts = [];
+                for (const line of lines) {
+                    if (line.startsWith(':')) continue;
+                    if (line.startsWith('event:')) ev = line.slice(6).trim();
+                    else if (line.startsWith('data:')) dataParts.push(line.slice(5).trimStart());
+                }
+                onEvent(ev, dataParts.join('\n'));
+            }
+            return buffer;
+        }
 
         runBtn.onclick = async () => {
             const system = systemEl.value.trim();
@@ -147,60 +134,63 @@
 
             outEl.textContent = '';
             setStatus('connecting...');
-            runBtn.disabled = true; stopBtn.disabled = false;
-            resetStats();
+            runBtn.disabled = true; stopBtn.disabled = false; resetStats();
 
             const mode = document.querySelector('input[name="mode"]:checked').value;
 
             try {
                 if (mode === 'sse-get') {
-                    // GET SSE: /api/chat/stream?system=&userPrompt=
-                    const qs = new URLSearchParams({ userPrompt });
-                    if (system) qs.set('system', system);
-                    es = new EventSource(`/api/chat/stream?` + qs.toString());
-                    es.onmessage = (e) => {
-                        chunkCount++;
-                        append(e.data || '');
-                    };
-                    es.addEventListener('done', () => { es.close(); es = null; done(); });
-                    es.onerror = (e) => { es?.close(); es=null; onError('SSE error'); };
-                    setStatus('streaming (SSE GET)');
+                    // GET SSE
+                    const qs = new URLSearchParams({ userPrompt }); if (system) qs.set('system', system);
+                    let closedByUs = false;
+                    es = new EventSource('/api/chat/stream?' + qs.toString());
+                    es.onopen = () => { setStatus('streaming (SSE GET)'); };
+                    es.onmessage = (e) => { chunkCount++; append(e.data || ''); };
+                    es.addEventListener('done', () => { closedByUs = true; es.close(); es = null; finish(); });
+                    es.onerror = (e) => { if (closedByUs) return; onError('SSE error (GET)'); };
+
                 } else if (mode === 'sse-post') {
-                    // POST SSE: fetch ReadableStream
+                    // POST SSE via fetch
                     abortController = new AbortController();
                     const resp = await fetch('/api/chat/stream', {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
                         body: JSON.stringify({ system, userPrompt }),
                         signal: abortController.signal
                     });
-                    if (!resp.ok || !resp.body) { throw new Error('HTTP ' + resp.status); }
+                    if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
                     setStatus('streaming (SSE POST)');
+
                     const reader = resp.body.getReader();
                     const decoder = new TextDecoder();
                     let buffer = '';
-                    while (true) {
-                        const { done: d, value } = await reader.read();
-                        if (d) break;
-                        buffer += decoder.decode(value, { stream: true });
-                        const events = buffer.split('\n\n'); // SSE event boundary
-                        buffer = events.pop(); // keep remainder
-                        for (const evt of events) {
-                            const lines = evt.split('\n');
-                            const dataLine = lines.find(l => l.startsWith('data: '));
-                            const eventLine = lines.find(l => l.startsWith('event: '));
-                            if (eventLine && eventLine.replace('event:','').trim() === 'done') {
-                                done(); return;
-                            }
-                            if (!dataLine) continue;
-                            const payload = dataLine.slice(6);
-                            chunkCount++;
-                            append(payload);
+                    let shouldStop = false;
+
+                    try {
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            buffer += decoder.decode(value, { stream: true });
+                            buffer = consumeSSEBuffer(buffer, (eventName, data) => {
+                                if (eventName === 'done') { shouldStop = true; }
+                                else if (data) { chunkCount++; append(data); }
+                            });
+                            if (shouldStop) { try { await reader.cancel(); } catch {} break; }
                         }
+                        finish();
+                    } catch (e) {
+                        // 사용자가 Stop을 눌러 abort된 경우: 에러로 취급하지 않음
+                        if (e && (e.name === 'AbortError' || String(e).includes('AbortError'))) {
+                            finish('stopped');
+                        } else {
+                            onError(e);
+                        }
+                    } finally {
+                        abortController = null;
                     }
-                    done();
+
                 } else {
-                    // once: POST /api/chat (non-stream)
+                    // Non-stream (once)
                     const resp = await fetch('/api/chat', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -209,10 +199,15 @@
                     if (!resp.ok) throw new Error('HTTP ' + resp.status);
                     const json = await resp.json();
                     append(json.content ?? '');
-                    done();
+                    finish();
                 }
             } catch (e) {
-                onError(e);
+                // 네트워크, CORS, AbortError 등
+                if (e && (e.name === 'AbortError' || String(e).includes('AbortError'))) {
+                    finish('stopped');
+                } else {
+                    onError(e);
+                }
             }
         };
     })();

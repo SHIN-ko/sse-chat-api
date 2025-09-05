@@ -8,10 +8,11 @@ server:
 app:
   model:
     base-url: http://localhost:8000/v1   # ? ???? ?? ??? ?? ? localhost ??
-    endpoint: /chat/completions           # ?? URL = base-url + endpoint
+    endpoint: /completions           # ?? URL = base-url + endpoint
     name: local-llama                     # compose? --alias ? ??
     api-key: ""                           # llama.cpp? --api-key ?? ? ??? ? ??
     temperature: 0.2
+    max-tokens: 64
     use-guided-json: false
     lora-name: ""
   sse:
