@@ -1,6 +1,9 @@
 version: "3.9"
 
 services:
+  # -------------------------
+  # LLaMA.cpp (Week1 모델 실행)
+  # -------------------------
   llama_cpp:
     image: ghcr.io/ggml-org/llama.cpp:server
     container_name: llama_cpp
@@ -10,7 +13,7 @@ services:
       - ./models:/models:ro
     command:
       - -m
-      - /models/Dolphin3.0-Llama3.1-8B-Q8_0.gguf      # ← 여기에 넣은 gguf 파일명으로 바꾸세요
+      - /models/Dolphin3.0-Llama3.1-8B-Q8_0.gguf   # GGUF 파일명 교체
       - --host
       - 0.0.0.0
       - --port
@@ -20,4 +23,55 @@ services:
       - -t
       - "8"        # CPU 코어 수에 맞게 (예: 8)
       - -c
-      - "4096"     # 너무 크게 잡지 말고 4K부터
+      - "4096"     # context length (4096 권장)
+
+  # -------------------------
+  # DynamoDB Local (Week2 저장소)
+  # -------------------------
+  dynamodb:
+    image: amazon/dynamodb-local
+    container_name: dynamodb-local
+    command: -jar DynamoDBLocal.jar -sharedDb -dbPath /home/dynamodblocal/data
+    volumes:
+      - ./dynamodb_data:/home/dynamodblocal/data
+
+    # DynamoDB 포트 충돌 해결 위해 예: 8001 사용
+    # (Spring에서 endpointOverride=http://localhost:8001)
+    ports:
+      - "8001:8000"
+
+  # -------------------------
+  # OpenSearch (Week3 검색)
+  # -------------------------
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: opensearch
+    environment:
+      - discovery.type=single-node
+      - "OPENSEARCH_JAVA_OPTS=-Xms1g -Xmx1g"
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=Ab9!qJ7^Lm4?    # ← 강한 비번 (따옴표 없이)
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    ports: [ "9200:9200", "9600:9600" ]
+    healthcheck:
+      # 자체서명 인증서라 -k 필요
+      test: ["CMD-SHELL", "curl -sk https://localhost:9200 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  # -------------------------
+  # OpenSearch Dashboards (UI)
+  # -------------------------
+  dashboards:
+    image: opensearchproject/opensearch-dashboards:2.13.0
+    container_name: os-dash
+    environment:
+      OPENSEARCH_HOSTS: '["https://opensearch:9200"]'  # ← 반드시 https
+      OPENSEARCH_SECURITY_ENABLED: "true"
+      OPENSEARCH_USERNAME: "admin"
+      OPENSEARCH_PASSWORD: "Ab9!qJ7^Lm4?"              # ← OpenSearch와 동일
+      OPENSEARCH_SSL_VERIFICATIONMODE: "none"          # ← 자체서명 cert 허용
+    ports: [ "5601:5601" ]
+    depends_on:
+      opensearch:
+        condition: service_healthy
