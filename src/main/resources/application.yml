@@ -17,3 +17,6 @@ app:
     lora-name: ""
   sse:
     heartbeat-seconds: 20                 # (??) ???? ??
+
+aws:
+  region: ap-northeast-2

@@ -27,6 +27,17 @@ dependencies {
 
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
+
+    // DJP
+    implementation('ai.djl:api:0.31.1')
+    implementation("ai.djl.pytorch:pytorch-engine:0.29.0")
+    implementation("ai.djl.huggingface:tokenizers:0.29.0")
+
+    // DynamoDB
+    implementation("software.amazon.awssdk:dynamodb:2.25.54")
+    implementation("software.amazon.awssdk:auth:2.25.54")        // (권장) 크레덴셜 체인
+    implementation("software.amazon.awssdk:regions:2.25.54")     // (권장) Region 상수
+
     implementation 'org.json:json:20240303'
 
 
