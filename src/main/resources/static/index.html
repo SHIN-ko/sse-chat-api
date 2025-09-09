@@ -9,7 +9,7 @@
     h1 { font-size: 22px; margin: 0 0 8px; }
     .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
     label { font-weight: 600; display: block; margin-bottom: 6px; }
-    textarea, input[type="text"] { width: 100%; padding: 10px; border: 1px solid #e5e7eb; border-radius: 10px; }
+    textarea, input[type="text"], input[type="number"] { width: 100%; padding: 10px; border: 1px solid #e5e7eb; border-radius: 10px; }
     textarea { min-height: 80px; }
     .row { display: grid; gap: var(--gap); }
     .row.cols-2 { grid-template-columns: 1fr 1fr; }
@@ -21,10 +21,15 @@
     pre#out { white-space: pre-wrap; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; min-height: 180px; margin: 0; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
     .small { font-size: 12px; }
+    /* Search 영역 */
+    .table { width: 100%; border-collapse: collapse; }
+    .table th, .table td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; font-size: 13px; }
+    .muted { opacity: .7; }
 </style>
 
 <h1>Streaming Chat (SSE) — Demo</h1>
 
+<!-- === Chat (기존) ===================================================== -->
 <div class="card">
     <div class="row">
         <div>
@@ -75,9 +80,62 @@
     <pre id="out" class="mono"></pre>
     <div class="status mono small" id="stats"></div>
 </div>
+
+<!-- === Search (추가) ===================================================== -->
+<div class="card">
+    <h2 style="margin:0 0 8px;font-size:18px;">Semantic Search (KNN) — /api/search</h2>
+    <div class="row cols-3">
+        <div>
+            <label for="q">Query</label>
+            <input id="q" type="text" placeholder="예: 가위바위보에 대해 알려줘" value="가위바위보">
+        </div>
+        <div>
+            <label for="topk">Top K</label>
+            <input id="topk" type="number" min="1" max="50" value="5">
+        </div>
+        <div>
+            <label style="visibility:hidden;">.</label>
+            <div class="actions">
+                <button id="searchRun">Search</button>
+                <button id="searchClear">Clear</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="row" style="margin-top:var(--gap)">
+        <div>
+            <label>결과 요약</label>
+            <div id="searchSummary" class="mono small muted">-</div>
+        </div>
+    </div>
+
+    <div class="row" style="margin-top:var(--gap)">
+        <div>
+            <label>Top-K Hits</label>
+            <div style="overflow:auto;">
+                <table class="table mono small" id="hitsTable">
+                    <thead>
+                    <tr><th>#</th><th>score</th><th>_id</th><th>title</th><th>preview</th></tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="row" style="margin-top:var(--gap)">
+        <div>
+            <label>Raw JSON</label>
+            <pre id="searchRaw" class="mono" style="min-height:120px;"></pre>
+        </div>
+    </div>
+</div>
+
 <script>
     (() => {
         const $ = (s) => document.querySelector(s);
+
+        /* ===================== Chat (기존) ===================== */
         const systemEl = $('#system'), userEl = $('#user');
         const outEl = $('#out'), statusEl = $('#status'), statsEl = $('#stats');
         const runBtn = $('#run'), stopBtn = $('#stop');
@@ -179,7 +237,6 @@
                         }
                         finish();
                     } catch (e) {
-                        // 사용자가 Stop을 눌러 abort된 경우: 에러로 취급하지 않음
                         if (e && (e.name === 'AbortError' || String(e).includes('AbortError'))) {
                             finish('stopped');
                         } else {
@@ -202,7 +259,6 @@
                     finish();
                 }
             } catch (e) {
-                // 네트워크, CORS, AbortError 등
                 if (e && (e.name === 'AbortError' || String(e).includes('AbortError'))) {
                     finish('stopped');
                 } else {
@@ -210,5 +266,76 @@
                 }
             }
         };
+
+        /* ===================== Search (추가) ===================== */
+        const qEl = $('#q');
+        const topkEl = $('#topk');
+        const searchRunBtn = $('#searchRun');
+        const searchClearBtn = $('#searchClear');
+        const searchSummaryEl = $('#searchSummary');
+        const hitsTableBody = $('#hitsTable tbody');
+        const searchRawEl = $('#searchRaw');
+
+        function renderHits(hits) {
+            hitsTableBody.innerHTML = '';
+            hits.forEach((h, i) => {
+                const tr = document.createElement('tr');
+                const src = h._source || {};
+                const textPreview = (src.text || '').toString().slice(0, 100).replace(/\s+/g, ' ');
+                tr.innerHTML = `
+                    <td>${i+1}</td>
+                    <td>${(h._score ?? '').toFixed ? h._score.toFixed(4) : h._score}</td>
+                    <td>${h._id ?? ''}</td>
+                    <td>${(src.title ?? '').toString().replace(/</g,'&lt;')}</td>
+                    <td class="muted">${textPreview}${(src.text||'').length>100?'…':''}</td>
+                `;
+                hitsTableBody.appendChild(tr);
+            });
+        }
+
+        async function runSearch() {
+            const q = qEl.value.trim();
+            const k = Math.max(1, Number(topkEl.value || 5));
+            if (!q) { alert('Query를 입력하세요.'); return; }
+
+            searchSummaryEl.textContent = 'loading...';
+            hitsTableBody.innerHTML = '';
+            searchRawEl.textContent = '';
+
+            const qs = new URLSearchParams({ q, k: String(k) });
+            const resp = await fetch('/api/search?' + qs.toString(), { method: 'GET' });
+
+            if (!resp.ok) {
+                searchSummaryEl.textContent = `HTTP ${resp.status}`;
+                return;
+            }
+            const json = await resp.json();
+
+            // 요약
+            const total = json?.hits?.total?.value ?? 0;
+            const took = json?.took ?? '-';
+            searchSummaryEl.textContent = `total=${total} | took=${took}ms`;
+
+            // 테이블
+            const hits = json?.hits?.hits ?? [];
+            renderHits(hits);
+
+            // Raw JSON
+            searchRawEl.textContent = JSON.stringify(json, null, 2);
+        }
+
+        function clearSearch() {
+            hitsTableBody.innerHTML = '';
+            searchSummaryEl.textContent = '-';
+            searchRawEl.textContent = '';
+        }
+
+        searchRunBtn.onclick = runSearch;
+        searchClearBtn.onclick = clearSearch;
+
+        // Enter로 검색 실행
+        qEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.isComposing) { runSearch(); }
+        });
     })();
 </script>
