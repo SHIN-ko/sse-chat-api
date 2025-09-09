@@ -4,6 +4,11 @@ plugins {
     id 'java'
 }
 
+ext {
+    djlVersion = '0.25.0'    // 0.24.0 ~ 0.27.0 정도 사용 권장
+    torchVersion = '1.13.1'  // macOS x86_64는 2.x 불가 → 1.13.1 사용
+}
+
 group = 'com.midasit.hdot'
 version = '0.0.1-SNAPSHOT'
 description = 'sse-chat-api'
@@ -24,14 +29,16 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'io.micrometer:micrometer-registry-prometheus'
-
-    implementation 'com.fasterxml.jackson.core:jackson-databind'
     implementation 'com.fasterxml.jackson.dataformat:jackson-dataformat-yaml'
 
     // DJP
-    implementation('ai.djl:api:0.31.1')
-    implementation("ai.djl.pytorch:pytorch-engine:0.29.0")
-    implementation("ai.djl.huggingface:tokenizers:0.29.0")
+    implementation "ai.djl:api:${djlVersion}"
+    implementation "ai.djl.pytorch:pytorch-engine:${djlVersion}"
+    implementation "ai.djl.huggingface:tokenizers:${djlVersion}"
+    implementation "com.microsoft.onnxruntime:onnxruntime:1.18.0"
+
+    // macOS Intel 전용 네이티브
+    runtimeOnly   "ai.djl.pytorch:pytorch-native-cpu:${torchVersion}:osx-x86_64"
 
     // DynamoDB
     implementation("software.amazon.awssdk:dynamodb:2.25.54")

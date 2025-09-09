@@ -7,16 +7,29 @@ server:
 
 app:
   model:
-    base-url: http://localhost:8000/v1   # ? ???? ?? ??? ?? ? localhost ??
-    endpoint: /completions           # ?? URL = base-url + endpoint
-    name: local-llama                     # compose? --alias ? ??
-    api-key: ""                           # llama.cpp? --api-key ?? ? ??? ? ??
+    base-url: http://localhost:8000/v1
+    endpoint: /completions
+    name: local-llama
+    api-key: ""
     temperature: 0.2
     max-tokens: 64
     use-guided-json: false
     lora-name: ""
   sse:
-    heartbeat-seconds: 20                 # (??) ???? ??
-
+    heartbeat-seconds: 20
+  embedding:
+    onnx:
+      model-dir: "/Users/shs0920/IdeaProjects/sse-chat-api/models/all-MiniLM-L6-v2"
+      tokenizer-json: "/Users/shs0920/IdeaProjects/sse-chat-api/models/all-MiniLM-L6-v2/tokenizer.json"
+      max-length: 256
+  opensearch:
+    base-url: https://localhost:9200
+    index: rag_docs
+    username: admin
+    password: Ab9!qJ7^Lm4?
+  dynamo:
+    endpoint: http://localhost:8001
+    region: ap-northeast-2   # 로컬에선 의미 없음. 아무 리전이나 OK.
+    table: rag_raw_docs
 aws:
   region: ap-northeast-2
