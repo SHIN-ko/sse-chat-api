@@ -10,6 +10,8 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.util.List;
+
 @Component
 public class ModelClient {
 
@@ -30,23 +32,29 @@ public class ModelClient {
     @Value("${app.model.temperature:0.2}")
     private double temperature;
 
-    @Value("${app.model.max-tokens:64}")
+    @Value("${app.model.max-tokens:512}") // ← RAG에선 64는 너무 짧아서 기본 512 권장
     private int maxTokens;
 
     public ModelClient(WebClient webClient) {
         this.webClient = webClient;
     }
 
+    /* -------------------------
+       URL/엔드포인트 정규화
+       ------------------------- */
     private String url() {
-        String base = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length()-1) : baseUrl;
-        return base + endpoint;
+        String base = baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl;
+        String ep   = endpoint.startsWith("/") ? endpoint : ("/" + endpoint);
+        return base + ep;
     }
 
     private boolean isChat()        { return endpoint.contains("/chat/"); }
     private boolean isV1Compl()     { return endpoint.contains("/v1/completions") || endpoint.endsWith("/completions"); }
     private boolean isLegacyCompl() { return endpoint.endsWith("/completion"); } // llama.cpp 고유
 
-    /** 공통 요청 바디 생성 (stream:true로 요청; 업스트림이 무시하고 JSON 한 번에 줘도 처리함) */
+    /* -------------------------
+       공통 요청 바디 생성
+       ------------------------- */
     private JSONObject buildBody(String system, String userPrompt, boolean stream) {
         JSONObject body = new JSONObject().put("temperature", temperature).put("stream", stream);
         if (isChat()) {
@@ -77,7 +85,9 @@ public class ModelClient {
         return body;
     }
 
-    /** 스트리밍: 가능하면 SSE로, 아니면 JSON 한방 응답을 파싱해서 Flux로 변환 */
+    /* -------------------------
+       스트리밍 호출
+       ------------------------- */
     public Flux<String> streamDeltas(String system, String userPrompt) {
         JSONObject body = buildBody(system, userPrompt, true);
 
@@ -88,7 +98,7 @@ public class ModelClient {
                 .bodyValue(body.toString())
                 .exchangeToFlux(resp -> {
                     MediaType ct = resp.headers().contentType().orElse(MediaType.APPLICATION_JSON);
-                    // 1) SSE (text/event-stream)
+                    // 1) SSE
                     if (MediaType.TEXT_EVENT_STREAM.isCompatibleWith(ct)) {
                         return resp.bodyToFlux(String.class)
                                 .flatMap(chunk -> Flux.fromArray(chunk.split("\\r?\\n")))
@@ -103,22 +113,20 @@ public class ModelClient {
                     return resp.bodyToMono(String.class)
                             .flatMapMany(json -> {
                                 String text = extractTextFromNonStream(json);
-                                return text == null || text.isBlank()
-                                        ? Flux.empty()
-                                        : Flux.just(text);
+                                return text.isBlank() ? Flux.empty() : Flux.just(text);
                             });
                 });
     }
 
-    /** 비-스트리밍: 필요 시 JSON 한방 호출 */
+    /* -------------------------
+       논-스트리밍 호출
+       ------------------------- */
     public Mono<String> complete(String system, String userPrompt) {
-        // 스트림 시도 → 없으면 논스트림 재시도
         return streamDeltas(system, userPrompt)
                 .reduce(new StringBuilder(), StringBuilder::append)
                 .map(StringBuilder::toString)
                 .flatMap(s -> {
                     if (s != null && !s.isBlank()) return Mono.just(s);
-                    // 스트림에서 아무 것도 못 뽑았으면 논스트림으로 재호출
                     JSONObject nonStreamBody = buildBody(system, userPrompt, false);
                     return webClient.post()
                             .uri(url())
@@ -132,12 +140,49 @@ public class ModelClient {
                 });
     }
 
-    /** 스트림 조각에서 안전 추출 */
+    /* -------------------------
+       RAG 전용: 검색 컨텍스트 포함 완성 호출
+       contexts: 검색 결과 text들의 리스트(이미 정렬된 top-k)
+       maxContextChars: 컨텍스트 총 글자수 제한(토큰 가드)
+       ------------------------- */
+    public Mono<String> completeWithContext(String system, String question, List<String> contexts, int maxContextChars) {
+        String prompt = buildRagPrompt(question, contexts, maxContextChars);
+        return complete(system, prompt);
+    }
+
+    /* -------------------------
+       RAG 프롬프트 빌더
+       ------------------------- */
+    private String buildRagPrompt(String question, List<String> contexts, int maxContextChars) {
+        StringBuilder ctx = new StringBuilder();
+        int remain = Math.max(0, maxContextChars);
+        int i = 1;
+        for (String c : contexts) {
+            String chunk = "### Document " + (i++) + "\n" + c + "\n\n";
+            if (chunk.length() > remain) break;
+            ctx.append(chunk);
+            remain -= chunk.length();
+        }
+        // 시스템 메시지/사용자 메시지로 들어갈 userPrompt를 구성
+        return """
+                아래는 질의에 답하기 위한 참고 문서들입니다. 문서 내용만 근거로 삼아 답변하세요.
+                모르면 모른다고 말하세요. 답변은 한국어로 간결히, 필요 시 코드/명령 예시를 포함하세요.
+
+                [CONTEXT]
+                %s
+                [QUESTION]
+                %s
+                """.formatted(ctx.toString(), question);
+    }
+
+    /* -------------------------
+       스트림 파서 보강
+       ------------------------- */
     private String extractTextSafely(String payload) {
         try {
             var obj = new JSONObject(payload);
 
-            // chat stream: choices[0].delta.content / reasoning_content
+            // OpenAI chat stream: choices[0].delta.content / reasoning_content
             if (obj.has("choices")) {
                 var ch0 = obj.getJSONArray("choices").optJSONObject(0);
                 if (ch0 != null) {
@@ -153,11 +198,23 @@ public class ModelClient {
                     // v1/completions stream: choices[0].text
                     String t = ch0.optString("text", "");
                     if (!t.isBlank()) return t;
+                    // 일부 구현체: choices[0].message.content
+                    var msg = ch0.optJSONObject("message");
+                    if (msg != null) {
+                        String c = msg.optString("content", "");
+                        if (!c.isBlank()) return c;
+                        String rc = msg.optString("reasoning_content", "");
+                        if (!rc.isBlank()) return rc;
+                    }
                 }
             }
-            // /completion stream: top-level content
+            // /completion stream 또는 커스텀
             String top = obj.optString("content", "");
             if (!top.isBlank()) return top;
+
+            // 일부 서버: { "response": "..." }
+            String resp = obj.optString("response", "");
+            if (!resp.isBlank()) return resp;
 
             // 일부 구현체: { "delta":"..." }
             String plainDelta = obj.optString("delta", "");
@@ -169,30 +226,36 @@ public class ModelClient {
         }
     }
 
-    /** 논스트림 JSON에서 안전 추출 */
+    /* -------------------------
+       논-스트림 파서 보강
+       ------------------------- */
     private String extractTextFromNonStream(String json) {
         try {
             var obj = new JSONObject(json);
 
-            // /v1/chat/completions (non-stream): choices[0].message.content
+            // /v1/chat/completions
             if (obj.has("choices")) {
                 var ch0 = obj.getJSONArray("choices").optJSONObject(0);
                 if (ch0 != null) {
-                    if (ch0.has("message")) {
-                        var msg = ch0.optJSONObject("message");
-                        if (msg != null) {
-                            String c = msg.optString("content", "");
-                            if (!c.isBlank()) return c;
-                        }
+                    var msg = ch0.optJSONObject("message");
+                    if (msg != null) {
+                        String c = msg.optString("content", "");
+                        if (!c.isBlank()) return c;
+                        String rc = msg.optString("reasoning_content", "");
+                        if (!rc.isBlank()) return rc;
                     }
-                    // /v1/completions (non-stream): choices[0].text
+                    // /v1/completions
                     String t = ch0.optString("text", "");
                     if (!t.isBlank()) return t;
                 }
             }
-            // /completion (non-stream): top-level content
+            // /completion or custom
             String top = obj.optString("content", "");
             if (!top.isBlank()) return top;
+
+            // 일부 서버: { "response": "..." }
+            String resp = obj.optString("response", "");
+            if (!resp.isBlank()) return resp;
 
             return "";
         } catch (Exception ignore) {

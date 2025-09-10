@@ -1,7 +1,7 @@
 <!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>SSE Chat Demo</title>
+<title>SSE Chat & RAG Demo</title>
 <style>
     :root { --gap: 12px; }
     * { box-sizing: border-box; }
@@ -28,7 +28,7 @@
 
 <h1>Streaming Chat (SSE) — Demo</h1>
 
-<!-- Chat (그대로) -->
+<!-- Chat -->
 <div class="card">
     <div class="row">
         <div>
@@ -94,7 +94,7 @@
             <input id="topk" type="number" min="1" max="50" value="5">
         </div>
         <div>
-            <label for="rerank">Reranker</label>
+            <label for="useRerank">Reranker</label>
             <div class="row cols-2">
                 <label class="mono small"><input type="checkbox" id="useRerank" checked> use reranker</label>
                 <select id="rerankMode">
@@ -139,11 +139,66 @@
     </div>
 </div>
 
+<!-- RAG Ask (/api/ask 사용) -->
+<div class="card">
+    <h2 style="margin:0 0 8px;font-size:18px;">RAG Ask — /api/ask</h2>
+
+    <div class="row cols-3">
+        <div>
+            <label for="askQ">Question</label>
+            <input id="askQ" type="text" placeholder="예: OpenSearch knn_vector 매핑 방법" value="OpenSearch knn_vector 매핑 방법">
+        </div>
+        <div>
+            <label for="askTopk">Top K</label>
+            <input id="askTopk" type="number" min="1" max="50" value="8">
+        </div>
+        <div>
+            <label for="askUseRerank">Reranker</label>
+            <div class="row cols-2">
+                <label class="mono small"><input type="checkbox" id="askUseRerank" checked> use reranker</label>
+            </div>
+        </div>
+    </div>
+
+    <div class="row" style="margin-top:var(--gap)">
+        <div class="actions">
+            <button id="askRun">Ask</button>
+            <button id="askClear">Clear</button>
+        </div>
+    </div>
+
+    <div class="row" style="margin-top:var(--gap)">
+        <div>
+            <label>Answer</label>
+            <pre id="askAnswer" class="mono" style="min-height:120px;"></pre>
+        </div>
+    </div>
+
+    <div class="row" style="margin-top:var(--gap)">
+        <div>
+            <label>Sources</label>
+            <div style="overflow:auto;">
+                <table class="table mono small" id="askSourcesTbl">
+                    <thead><tr><th>#</th><th>rerankScore</th><th>osScore</th><th>_id</th><th>title</th><th>preview</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div class="row" style="margin-top:var(--gap)">
+        <div>
+            <label>Raw JSON</label>
+            <pre id="askRaw" class="mono" style="min-height:100px;"></pre>
+        </div>
+    </div>
+</div>
+
 <script>
     (() => {
         const $ = (s) => document.querySelector(s);
 
-        /* ===== Chat (생략: 기존 코드 동일) ===== */
+        /* ===== Chat ===== */
         const systemEl = $('#system'), userEl = $('#user');
         const outEl = $('#out'), statusEl = $('#status'), statsEl = $('#stats');
         const runBtn = $('#run'), stopBtn = $('#stop');
@@ -158,16 +213,36 @@
         const append = (t) => { outEl.textContent += t; charCount += t.length; if (autoscrollEl.checked) outEl.scrollTop = outEl.scrollHeight; statsTick(); };
         const finish = (label='done') => { setStatus(label); runBtn.disabled=false; stopBtn.disabled=true; if (appendNewlineEl.checked) append('\n'); };
         const onError = (err) => { console.error('[UI] error:', err); setStatus(`error: ${String(err)}`); runBtn.disabled=false; stopBtn.disabled=true; };
+
         clearBtn.onclick = () => { outEl.textContent=''; setStatus('idle'); statsEl.textContent=''; };
         copyBtn.onclick = async () => { try { await navigator.clipboard.writeText(outEl.textContent); setStatus('copied'); } catch { setStatus('copy failed'); } };
         downloadBtn.onclick = () => { const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([outEl.textContent],{type:'text/plain'})); a.download=`chat-${new Date().toISOString().replace(/[:.]/g,'')}.txt`; a.click(); URL.revokeObjectURL(a.href); };
         stopBtn.onclick = () => { if (es) { es.close(); es=null; } if (abortController) { abortController.abort(); abortController=null; } finish('stopped'); };
-        function consumeSSEBuffer(buffer, onEvent) { let idx; while((idx=buffer.indexOf('\n\n'))!==-1){ const raw=buffer.slice(0,idx); buffer=buffer.slice(idx+2); const lines=raw.split(/\r?\n/); let ev='message'; const dataParts=[]; for(const line of lines){ if(line.startsWith(':')) continue; if(line.startsWith('event:')) ev=line.slice(6).trim(); else if(line.startsWith('data:')) dataParts.push(line.slice(5).trimStart()); } onEvent(ev,dataParts.join('\n')); } return buffer; }
-        runBtn.onclick = async () => {
+
+        function consumeSSEBuffer(buffer, onEvent) {
+            let idx;
+            while ((idx = buffer.indexOf('\n\n')) !== -1) {
+                const raw = buffer.slice(0, idx);
+                buffer = buffer.slice(idx + 2);
+                const lines = raw.split(/\r?\n/);
+                let ev = 'message';
+                const dataParts = [];
+                for (const line of lines) {
+                    if (line.startsWith(':')) continue;
+                    if (line.startsWith('event:')) ev = line.slice(6).trim();
+                    else if (line.startsWith('data:')) dataParts.push(line.slice(5).trimStart());
+                }
+                onEvent(ev, dataParts.join('\n'));
+            }
+            return buffer;
+        }
+
+        $('#run').onclick = async () => {
             const system = systemEl.value.trim();
             const userPrompt = userEl.value.trim();
             if (!userPrompt) { alert('User Prompt를 입력하세요.'); return; }
             outEl.textContent = ''; setStatus('connecting...'); runBtn.disabled=true; stopBtn.disabled=false; resetStats();
+
             const mode = document.querySelector('input[name="mode"]:checked').value;
             try {
                 if (mode === 'sse-get') {
@@ -181,35 +256,46 @@
                 } else if (mode === 'sse-post') {
                     abortController = new AbortController();
                     const resp = await fetch('/api/chat/stream', {
-                        method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-                        body: JSON.stringify({ system, userPrompt }), signal: abortController.signal
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+                        body: JSON.stringify({ system, userPrompt }),
+                        signal: abortController.signal
                     });
                     if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
                     setStatus('streaming (SSE POST)');
                     const reader = resp.body.getReader(); const decoder = new TextDecoder(); let buffer=''; let shouldStop=false;
                     try {
-                        while (true) { const {done, value} = await reader.read(); if (done) break;
+                        while (true) {
+                            const {done, value} = await reader.read();
+                            if (done) break;
                             buffer += decoder.decode(value, {stream:true});
-                            buffer = consumeSSEBuffer(buffer, (eventName, data) => { if (eventName === 'done') { shouldStop = true; } else if (data) { chunkCount++; append(data); }});
+                            buffer = consumeSSEBuffer(buffer, (eventName, data) => {
+                                if (eventName === 'done') { shouldStop = true; }
+                                else if (data) { chunkCount++; append(data); }
+                            });
                             if (shouldStop) { try { await reader.cancel(); } catch {} break; }
-                        } finish();
-                    } catch (e) { if (e && (e.name==='AbortError'||String(e).includes('AbortError'))) { finish('stopped'); } else { onError(e); } }
-                    finally { abortController = null; }
+                        }
+                        finish();
+                    } catch (e) {
+                        if (e && (e.name==='AbortError'||String(e).includes('AbortError'))) { finish('stopped'); }
+                        else { onError(e); }
+                    } finally { abortController = null; }
                 } else {
                     const resp = await fetch('/api/chat', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ system, userPrompt }) });
                     if (!resp.ok) throw new Error('HTTP ' + resp.status);
                     const json = await resp.json(); append(json.content ?? ''); finish();
                 }
-            } catch (e) { if (e && (e.name==='AbortError'||String(e).includes('AbortError'))) { finish('stopped'); } else { onError(e); } }
+            } catch (e) {
+                if (e && (e.name==='AbortError'||String(e).includes('AbortError'))) { finish('stopped'); }
+                else { onError(e); }
+            }
         };
 
         /* ===== Search (/api/search2) ===== */
         const qEl = $('#q'), topkEl = $('#topk'), useRerankEl = $('#useRerank'), rerankModeEl = $('#rerankMode');
-        const searchRunBtn = $('#searchRun'), searchClearBtn = $('#searchClear');
         const searchSummaryEl = $('#searchSummary'), hitsHeadEl = $('#hitsHead'), hitsTableBody = $('#hitsTable tbody'), searchRawEl = $('#searchRaw');
 
         const f4 = (x) => (typeof x === 'number' && isFinite(x)) ? x.toFixed(4) : x;
-
         function setHead(mode) {
             if (mode === 'reranked') {
                 hitsHeadEl.innerHTML = `<tr><th>#</th><th>rerankScore</th><th>osScore</th><th>_id</th><th>title</th><th>preview</th></tr>`;
@@ -217,21 +303,16 @@
                 hitsHeadEl.innerHTML = `<tr><th>#</th><th>score</th><th>_id</th><th>title</th><th>preview</th></tr>`;
             }
         }
-
         function escapeHtml(s){ return (s ?? '').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
-
         function renderHits(hits, mode) {
             hitsTableBody.innerHTML = '';
             hits.forEach((h, i) => {
                 let id, title, text, score, osScore, rerankScore;
                 if ('rerankScore' in h) {
-                    // 리랭크 커스텀
                     id = h._id; title = h.title || ''; text = h.text || ''; osScore = h.osScore; rerankScore = h.rerankScore;
                 } else if ('id' in h && 'score' in h) {
-                    // /api/search2 (rerank=false) 의 파싱된 OsHit
                     id = h.id; title = h.title || ''; text = h.text || ''; score = h.score;
                 } else if ('_source' in h) {
-                    // 원본 OpenSearch 형식
                     id = h._id; title = h._source?.title || ''; text = h._source?.text || ''; score = h._score;
                 }
                 const preview = (text || '').slice(0, 100).replace(/\s+/g, ' ');
@@ -241,13 +322,11 @@
                 const tr = document.createElement('tr'); tr.innerHTML = rowHtml; hitsTableBody.appendChild(tr);
             });
         }
-
         async function runSearch() {
             const q = qEl.value.trim();
             const k = Math.max(1, Number(topkEl.value || 5));
             const wantRerank = !!useRerankEl.checked;
-            const modeHint = rerankModeEl.value; // 서버에서 쓰면 사용, 아니면 무시
-
+            const modeHint = rerankModeEl.value; // 서버에서 사용해도 되고 무시해도 됨
             if (!q) { alert('Query를 입력하세요.'); return; }
 
             searchSummaryEl.textContent = 'loading...';
@@ -255,46 +334,90 @@
             searchRawEl.textContent = '';
 
             const qs = new URLSearchParams({ q, k: String(k), rerank: String(wantRerank) });
-            // 옵션 힌트 (서버에서 무시해도 됨)
             qs.set('type', modeHint);
-
-            // 항상 /api/search2 사용 (rerank on/off 모두 처리)
             const resp = await fetch('/api/search2?' + qs.toString(), { method: 'GET' });
-            if (!resp.ok) {
-                searchSummaryEl.textContent = `HTTP ${resp.status}`;
-                return;
-            }
-            // 안전 파싱
+            if (!resp.ok) { searchSummaryEl.textContent = `HTTP ${resp.status}`; return; }
+
             let json;
             const ct = resp.headers.get('content-type') || '';
             if (ct.includes('application/json')) json = await resp.json();
             else json = JSON.parse(await resp.text());
 
-            // hits 꺼내기
             const hits = (Array.isArray(json?.hits?.hits)) ? json.hits.hits : (json?.hits || []);
             const took = (typeof json?.took === 'number') ? json.took : '-';
-
-            // 실제로 리랭크 스코어가 있는지 감지
             const isReranked = hits.some(h => h && ('rerankScore' in h));
 
             setHead(isReranked ? 'reranked' : 'plain');
             renderHits(hits, isReranked ? 'reranked' : 'plain');
 
-            const total = isReranked ? hits.length
-                : (json?.hits?.total?.value ?? (Array.isArray(hits) ? hits.length : 0));
+            const total = isReranked ? hits.length : (json?.hits?.total?.value ?? (Array.isArray(hits) ? hits.length : 0));
             searchSummaryEl.textContent = `total=${total} | took=${took}ms`;
-
             searchRawEl.textContent = JSON.stringify(json, null, 2);
         }
-
         function clearSearch() {
             hitsTableBody.innerHTML = '';
             searchSummaryEl.textContent = '-';
             searchRawEl.textContent = '';
         }
-
         $('#searchRun').onclick = runSearch;
         $('#searchClear').onclick = clearSearch;
         $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) runSearch(); });
+
+        /* ===== RAG Ask (/api/ask) ===== */
+        const askQEl = $('#askQ'), askTopkEl = $('#askTopk'), askUseRerankEl = $('#askUseRerank');
+        const askAnswerEl = $('#askAnswer'), askSourcesTblBody = $('#askSourcesTbl tbody'), askRawEl = $('#askRaw');
+
+        function renderAskSources(hits) {
+            askSourcesTblBody.innerHTML = '';
+            hits.forEach((h, i) => {
+                const id = h._id ?? '';
+                const title = escapeHtml(h.title || '');
+                const text = (h.text || '');
+                const preview = text.slice(0, 100).replace(/\s+/g, ' ') + (text.length > 100 ? '…' : '');
+                const osScore = (typeof h.osScore === 'number') ? f4(h.osScore) : '';
+                const rr = (typeof h.rerankScore === 'number') ? f4(h.rerankScore) : '';
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+        <td>${i+1}</td>
+        <td>${rr}</td>
+        <td>${osScore}</td>
+        <td>${id}</td>
+        <td>${title}</td>
+        <td class="muted">${preview}</td>`;
+                askSourcesTblBody.appendChild(tr);
+            });
+        }
+
+        async function runAsk() {
+            const q = askQEl.value.trim();
+            const k = Math.max(1, Number(askTopkEl.value || 8));
+            const rerank = !!askUseRerankEl.checked;
+            if (!q) { alert('Question을 입력하세요.'); return; }
+
+            askAnswerEl.textContent = 'loading...';
+            askSourcesTblBody.innerHTML = '';
+            askRawEl.textContent = '';
+
+            const qs = new URLSearchParams({ q, k: String(k), rerank: String(rerank) });
+            const resp = await fetch('/api/ask?' + qs.toString(), { method: 'GET' });
+            if (!resp.ok) { askAnswerEl.textContent = `HTTP ${resp.status}`; return; }
+
+            let json;
+            const ct = resp.headers.get('content-type') || '';
+            if (ct.includes('application/json')) json = await resp.json();
+            else json = JSON.parse(await resp.text());
+
+            askAnswerEl.textContent = json?.answer ?? '(no answer)';
+            renderAskSources(Array.isArray(json?.sources) ? json.sources : []);
+            askRawEl.textContent = JSON.stringify(json, null, 2);
+        }
+        function clearAsk() {
+            askAnswerEl.textContent = '';
+            askSourcesTblBody.innerHTML = '';
+            askRawEl.textContent = '';
+        }
+        $('#askRun').onclick = runAsk;
+        $('#askClear').onclick = clearAsk;
+        $('#askQ').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) runAsk(); });
     })();
 </script>

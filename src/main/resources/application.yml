@@ -37,3 +37,8 @@ app:
       max-length: 256
 aws:
   region: ap-northeast-2
+
+logging:
+  level:
+    org.springframework.web: DEBUG
+    org.springframework.http: DEBUG
