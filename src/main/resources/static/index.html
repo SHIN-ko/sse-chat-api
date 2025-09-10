@@ -9,7 +9,7 @@
     h1 { font-size: 22px; margin: 0 0 8px; }
     .card { border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
     label { font-weight: 600; display: block; margin-bottom: 6px; }
-    textarea, input[type="text"], input[type="number"] { width: 100%; padding: 10px; border: 1px solid #e5e7eb; border-radius: 10px; }
+    textarea, input[type="text"], input[type="number"], select { width: 100%; padding: 10px; border: 1px solid #e5e7eb; border-radius: 10px; }
     textarea { min-height: 80px; }
     .row { display: grid; gap: var(--gap); }
     .row.cols-2 { grid-template-columns: 1fr 1fr; }
@@ -21,7 +21,6 @@
     pre#out { white-space: pre-wrap; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px; min-height: 180px; margin: 0; }
     .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
     .small { font-size: 12px; }
-    /* Search 영역 */
     .table { width: 100%; border-collapse: collapse; }
     .table th, .table td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; font-size: 13px; }
     .muted { opacity: .7; }
@@ -29,16 +28,16 @@
 
 <h1>Streaming Chat (SSE) — Demo</h1>
 
-<!-- === Chat (기존) ===================================================== -->
+<!-- Chat (그대로) -->
 <div class="card">
     <div class="row">
         <div>
             <label for="system">System</label>
-            <textarea id="system" placeholder="시스템 프롬프트 (선택) 예: 너는 친절한 한국어 도우미야.">너는 친절한 한국어 도우미야.</textarea>
+            <textarea id="system">너는 친절한 한국어 도우미야.</textarea>
         </div>
         <div>
             <label for="user">User Prompt</label>
-            <textarea id="user" placeholder="질문을 입력하세요">Compose 환경에서 모델을 실행하는 장점을 2줄로 말해줘</textarea>
+            <textarea id="user">Compose 환경에서 모델을 실행하는 장점을 2줄로 말해줘</textarea>
         </div>
     </div>
 
@@ -81,9 +80,10 @@
     <div class="status mono small" id="stats"></div>
 </div>
 
-<!-- === Search (추가) ===================================================== -->
+<!-- Search (/api/search2 사용) -->
 <div class="card">
-    <h2 style="margin:0 0 8px;font-size:18px;">Semantic Search (KNN) — /api/search</h2>
+    <h2 style="margin:0 0 8px;font-size:18px;">Semantic Search (KNN / Rerank) — /api/search2</h2>
+
     <div class="row cols-3">
         <div>
             <label for="q">Query</label>
@@ -94,11 +94,21 @@
             <input id="topk" type="number" min="1" max="50" value="5">
         </div>
         <div>
-            <label style="visibility:hidden;">.</label>
-            <div class="actions">
-                <button id="searchRun">Search</button>
-                <button id="searchClear">Clear</button>
+            <label for="rerank">Reranker</label>
+            <div class="row cols-2">
+                <label class="mono small"><input type="checkbox" id="useRerank" checked> use reranker</label>
+                <select id="rerankMode">
+                    <option value="cross" selected>cross (onnx)</option>
+                    <option value="bi">bi (cosine)</option>
+                </select>
             </div>
+        </div>
+    </div>
+
+    <div class="row" style="margin-top:var(--gap)">
+        <div class="actions">
+            <button id="searchRun">Search</button>
+            <button id="searchClear">Clear</button>
         </div>
     </div>
 
@@ -111,12 +121,10 @@
 
     <div class="row" style="margin-top:var(--gap)">
         <div>
-            <label>Top-K Hits</label>
+            <label>Results</label>
             <div style="overflow:auto;">
                 <table class="table mono small" id="hitsTable">
-                    <thead>
-                    <tr><th>#</th><th>score</th><th>_id</th><th>title</th><th>preview</th></tr>
-                    </thead>
+                    <thead id="hitsHead"><tr><th>#</th><th>score</th><th>_id</th><th>title</th><th>preview</th></tr></thead>
                     <tbody></tbody>
                 </table>
             </div>
@@ -135,192 +143,147 @@
     (() => {
         const $ = (s) => document.querySelector(s);
 
-        /* ===================== Chat (기존) ===================== */
+        /* ===== Chat (생략: 기존 코드 동일) ===== */
         const systemEl = $('#system'), userEl = $('#user');
         const outEl = $('#out'), statusEl = $('#status'), statsEl = $('#stats');
         const runBtn = $('#run'), stopBtn = $('#stop');
         const copyBtn = $('#copy'), clearBtn = $('#clear'), downloadBtn = $('#download');
         const autoscrollEl = $('#autoscroll'), appendNewlineEl = $('#appendNewline');
 
-        let es = null;
-        let abortController = null;
+        let es = null, abortController = null;
         let startedAt = 0, chunkCount = 0, charCount = 0;
-
         const setStatus = (s) => statusEl.textContent = s;
         const resetStats = () => { startedAt = Date.now(); chunkCount = 0; charCount = 0; statsTick(); };
-        const statsTick = () => {
-            const sec = Math.max(0.001, (Date.now() - startedAt) / 1000);
-            statsEl.textContent = `chunks=${chunkCount} | chars=${charCount} | elapsed=${sec.toFixed(2)}s | cps≈${(charCount/sec).toFixed(1)}`;
-        };
+        const statsTick = () => { const sec = Math.max(0.001,(Date.now()-startedAt)/1000); statsEl.textContent = `chunks=${chunkCount} | chars=${charCount} | elapsed=${sec.toFixed(2)}s | cps≈${(charCount/sec).toFixed(1)}`; };
         const append = (t) => { outEl.textContent += t; charCount += t.length; if (autoscrollEl.checked) outEl.scrollTop = outEl.scrollHeight; statsTick(); };
-        const finish = (label='done') => { setStatus(label); runBtn.disabled = false; stopBtn.disabled = true; if (appendNewlineEl.checked) append('\n'); };
-        const onError = (err) => { console.error('[UI] error:', err); setStatus(`error: ${String(err)}`); runBtn.disabled = false; stopBtn.disabled = true; };
-
-        clearBtn.onclick = () => { outEl.textContent = ''; setStatus('idle'); statsEl.textContent=''; };
+        const finish = (label='done') => { setStatus(label); runBtn.disabled=false; stopBtn.disabled=true; if (appendNewlineEl.checked) append('\n'); };
+        const onError = (err) => { console.error('[UI] error:', err); setStatus(`error: ${String(err)}`); runBtn.disabled=false; stopBtn.disabled=true; };
+        clearBtn.onclick = () => { outEl.textContent=''; setStatus('idle'); statsEl.textContent=''; };
         copyBtn.onclick = async () => { try { await navigator.clipboard.writeText(outEl.textContent); setStatus('copied'); } catch { setStatus('copy failed'); } };
-        downloadBtn.onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([outEl.textContent], {type:'text/plain'})); a.download = `chat-${new Date().toISOString().replace(/[:.]/g,'')}.txt`; a.click(); URL.revokeObjectURL(a.href); };
-
-        stopBtn.onclick = () => {
-            if (es) { es.close(); es = null; }
-            if (abortController) { abortController.abort(); abortController = null; }
-            finish('stopped');
-        };
-
-        // SSE 이벤트 묶음 파서 (여러 data: 라인 결합)
-        function consumeSSEBuffer(buffer, onEvent) {
-            let idx;
-            while ((idx = buffer.indexOf('\n\n')) !== -1) {
-                const raw = buffer.slice(0, idx);
-                buffer = buffer.slice(idx + 2);
-                const lines = raw.split(/\r?\n/);
-                let ev = 'message';
-                const dataParts = [];
-                for (const line of lines) {
-                    if (line.startsWith(':')) continue;
-                    if (line.startsWith('event:')) ev = line.slice(6).trim();
-                    else if (line.startsWith('data:')) dataParts.push(line.slice(5).trimStart());
-                }
-                onEvent(ev, dataParts.join('\n'));
-            }
-            return buffer;
-        }
-
+        downloadBtn.onclick = () => { const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([outEl.textContent],{type:'text/plain'})); a.download=`chat-${new Date().toISOString().replace(/[:.]/g,'')}.txt`; a.click(); URL.revokeObjectURL(a.href); };
+        stopBtn.onclick = () => { if (es) { es.close(); es=null; } if (abortController) { abortController.abort(); abortController=null; } finish('stopped'); };
+        function consumeSSEBuffer(buffer, onEvent) { let idx; while((idx=buffer.indexOf('\n\n'))!==-1){ const raw=buffer.slice(0,idx); buffer=buffer.slice(idx+2); const lines=raw.split(/\r?\n/); let ev='message'; const dataParts=[]; for(const line of lines){ if(line.startsWith(':')) continue; if(line.startsWith('event:')) ev=line.slice(6).trim(); else if(line.startsWith('data:')) dataParts.push(line.slice(5).trimStart()); } onEvent(ev,dataParts.join('\n')); } return buffer; }
         runBtn.onclick = async () => {
             const system = systemEl.value.trim();
             const userPrompt = userEl.value.trim();
             if (!userPrompt) { alert('User Prompt를 입력하세요.'); return; }
-
-            outEl.textContent = '';
-            setStatus('connecting...');
-            runBtn.disabled = true; stopBtn.disabled = false; resetStats();
-
+            outEl.textContent = ''; setStatus('connecting...'); runBtn.disabled=true; stopBtn.disabled=false; resetStats();
             const mode = document.querySelector('input[name="mode"]:checked').value;
-
             try {
                 if (mode === 'sse-get') {
-                    // GET SSE
                     const qs = new URLSearchParams({ userPrompt }); if (system) qs.set('system', system);
                     let closedByUs = false;
                     es = new EventSource('/api/chat/stream?' + qs.toString());
                     es.onopen = () => { setStatus('streaming (SSE GET)'); };
                     es.onmessage = (e) => { chunkCount++; append(e.data || ''); };
                     es.addEventListener('done', () => { closedByUs = true; es.close(); es = null; finish(); });
-                    es.onerror = (e) => { if (closedByUs) return; onError('SSE error (GET)'); };
-
+                    es.onerror = () => { if (closedByUs) return; onError('SSE error (GET)'); };
                 } else if (mode === 'sse-post') {
-                    // POST SSE via fetch
                     abortController = new AbortController();
                     const resp = await fetch('/api/chat/stream', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
-                        body: JSON.stringify({ system, userPrompt }),
-                        signal: abortController.signal
+                        method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+                        body: JSON.stringify({ system, userPrompt }), signal: abortController.signal
                     });
                     if (!resp.ok || !resp.body) throw new Error('HTTP ' + resp.status);
                     setStatus('streaming (SSE POST)');
-
-                    const reader = resp.body.getReader();
-                    const decoder = new TextDecoder();
-                    let buffer = '';
-                    let shouldStop = false;
-
+                    const reader = resp.body.getReader(); const decoder = new TextDecoder(); let buffer=''; let shouldStop=false;
                     try {
-                        while (true) {
-                            const { done, value } = await reader.read();
-                            if (done) break;
-                            buffer += decoder.decode(value, { stream: true });
-                            buffer = consumeSSEBuffer(buffer, (eventName, data) => {
-                                if (eventName === 'done') { shouldStop = true; }
-                                else if (data) { chunkCount++; append(data); }
-                            });
+                        while (true) { const {done, value} = await reader.read(); if (done) break;
+                            buffer += decoder.decode(value, {stream:true});
+                            buffer = consumeSSEBuffer(buffer, (eventName, data) => { if (eventName === 'done') { shouldStop = true; } else if (data) { chunkCount++; append(data); }});
                             if (shouldStop) { try { await reader.cancel(); } catch {} break; }
-                        }
-                        finish();
-                    } catch (e) {
-                        if (e && (e.name === 'AbortError' || String(e).includes('AbortError'))) {
-                            finish('stopped');
-                        } else {
-                            onError(e);
-                        }
-                    } finally {
-                        abortController = null;
-                    }
-
+                        } finish();
+                    } catch (e) { if (e && (e.name==='AbortError'||String(e).includes('AbortError'))) { finish('stopped'); } else { onError(e); } }
+                    finally { abortController = null; }
                 } else {
-                    // Non-stream (once)
-                    const resp = await fetch('/api/chat', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ system, userPrompt })
-                    });
+                    const resp = await fetch('/api/chat', { method:'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify({ system, userPrompt }) });
                     if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                    const json = await resp.json();
-                    append(json.content ?? '');
-                    finish();
+                    const json = await resp.json(); append(json.content ?? ''); finish();
                 }
-            } catch (e) {
-                if (e && (e.name === 'AbortError' || String(e).includes('AbortError'))) {
-                    finish('stopped');
-                } else {
-                    onError(e);
-                }
-            }
+            } catch (e) { if (e && (e.name==='AbortError'||String(e).includes('AbortError'))) { finish('stopped'); } else { onError(e); } }
         };
 
-        /* ===================== Search (추가) ===================== */
-        const qEl = $('#q');
-        const topkEl = $('#topk');
-        const searchRunBtn = $('#searchRun');
-        const searchClearBtn = $('#searchClear');
-        const searchSummaryEl = $('#searchSummary');
-        const hitsTableBody = $('#hitsTable tbody');
-        const searchRawEl = $('#searchRaw');
+        /* ===== Search (/api/search2) ===== */
+        const qEl = $('#q'), topkEl = $('#topk'), useRerankEl = $('#useRerank'), rerankModeEl = $('#rerankMode');
+        const searchRunBtn = $('#searchRun'), searchClearBtn = $('#searchClear');
+        const searchSummaryEl = $('#searchSummary'), hitsHeadEl = $('#hitsHead'), hitsTableBody = $('#hitsTable tbody'), searchRawEl = $('#searchRaw');
 
-        function renderHits(hits) {
+        const f4 = (x) => (typeof x === 'number' && isFinite(x)) ? x.toFixed(4) : x;
+
+        function setHead(mode) {
+            if (mode === 'reranked') {
+                hitsHeadEl.innerHTML = `<tr><th>#</th><th>rerankScore</th><th>osScore</th><th>_id</th><th>title</th><th>preview</th></tr>`;
+            } else {
+                hitsHeadEl.innerHTML = `<tr><th>#</th><th>score</th><th>_id</th><th>title</th><th>preview</th></tr>`;
+            }
+        }
+
+        function escapeHtml(s){ return (s ?? '').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+        function renderHits(hits, mode) {
             hitsTableBody.innerHTML = '';
             hits.forEach((h, i) => {
-                const tr = document.createElement('tr');
-                const src = h._source || {};
-                const textPreview = (src.text || '').toString().slice(0, 100).replace(/\s+/g, ' ');
-                tr.innerHTML = `
-                    <td>${i+1}</td>
-                    <td>${(h._score ?? '').toFixed ? h._score.toFixed(4) : h._score}</td>
-                    <td>${h._id ?? ''}</td>
-                    <td>${(src.title ?? '').toString().replace(/</g,'&lt;')}</td>
-                    <td class="muted">${textPreview}${(src.text||'').length>100?'…':''}</td>
-                `;
-                hitsTableBody.appendChild(tr);
+                let id, title, text, score, osScore, rerankScore;
+                if ('rerankScore' in h) {
+                    // 리랭크 커스텀
+                    id = h._id; title = h.title || ''; text = h.text || ''; osScore = h.osScore; rerankScore = h.rerankScore;
+                } else if ('id' in h && 'score' in h) {
+                    // /api/search2 (rerank=false) 의 파싱된 OsHit
+                    id = h.id; title = h.title || ''; text = h.text || ''; score = h.score;
+                } else if ('_source' in h) {
+                    // 원본 OpenSearch 형식
+                    id = h._id; title = h._source?.title || ''; text = h._source?.text || ''; score = h._score;
+                }
+                const preview = (text || '').slice(0, 100).replace(/\s+/g, ' ');
+                const rowHtml = (mode === 'reranked')
+                    ? `<td>${i+1}</td><td>${f4(rerankScore)}</td><td>${f4(osScore)}</td><td>${id ?? ''}</td><td>${escapeHtml(title)}</td><td class="muted">${preview}${(text||'').length>100?'…':''}</td>`
+                    : `<td>${i+1}</td><td>${f4(score)}</td><td>${id ?? ''}</td><td>${escapeHtml(title)}</td><td class="muted">${preview}${(text||'').length>100?'…':''}</td>`;
+                const tr = document.createElement('tr'); tr.innerHTML = rowHtml; hitsTableBody.appendChild(tr);
             });
         }
 
         async function runSearch() {
             const q = qEl.value.trim();
             const k = Math.max(1, Number(topkEl.value || 5));
+            const wantRerank = !!useRerankEl.checked;
+            const modeHint = rerankModeEl.value; // 서버에서 쓰면 사용, 아니면 무시
+
             if (!q) { alert('Query를 입력하세요.'); return; }
 
             searchSummaryEl.textContent = 'loading...';
             hitsTableBody.innerHTML = '';
             searchRawEl.textContent = '';
 
-            const qs = new URLSearchParams({ q, k: String(k) });
-            const resp = await fetch('/api/search?' + qs.toString(), { method: 'GET' });
+            const qs = new URLSearchParams({ q, k: String(k), rerank: String(wantRerank) });
+            // 옵션 힌트 (서버에서 무시해도 됨)
+            qs.set('type', modeHint);
 
+            // 항상 /api/search2 사용 (rerank on/off 모두 처리)
+            const resp = await fetch('/api/search2?' + qs.toString(), { method: 'GET' });
             if (!resp.ok) {
                 searchSummaryEl.textContent = `HTTP ${resp.status}`;
                 return;
             }
-            const json = await resp.json();
+            // 안전 파싱
+            let json;
+            const ct = resp.headers.get('content-type') || '';
+            if (ct.includes('application/json')) json = await resp.json();
+            else json = JSON.parse(await resp.text());
 
-            // 요약
-            const total = json?.hits?.total?.value ?? 0;
-            const took = json?.took ?? '-';
+            // hits 꺼내기
+            const hits = (Array.isArray(json?.hits?.hits)) ? json.hits.hits : (json?.hits || []);
+            const took = (typeof json?.took === 'number') ? json.took : '-';
+
+            // 실제로 리랭크 스코어가 있는지 감지
+            const isReranked = hits.some(h => h && ('rerankScore' in h));
+
+            setHead(isReranked ? 'reranked' : 'plain');
+            renderHits(hits, isReranked ? 'reranked' : 'plain');
+
+            const total = isReranked ? hits.length
+                : (json?.hits?.total?.value ?? (Array.isArray(hits) ? hits.length : 0));
             searchSummaryEl.textContent = `total=${total} | took=${took}ms`;
 
-            // 테이블
-            const hits = json?.hits?.hits ?? [];
-            renderHits(hits);
-
-            // Raw JSON
             searchRawEl.textContent = JSON.stringify(json, null, 2);
         }
 
@@ -330,12 +293,8 @@
             searchRawEl.textContent = '';
         }
 
-        searchRunBtn.onclick = runSearch;
-        searchClearBtn.onclick = clearSearch;
-
-        // Enter로 검색 실행
-        qEl.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.isComposing) { runSearch(); }
-        });
+        $('#searchRun').onclick = runSearch;
+        $('#searchClear').onclick = clearSearch;
+        $('#q').addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) runSearch(); });
     })();
 </script>

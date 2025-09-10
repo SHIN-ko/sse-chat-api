@@ -1,16 +1,8 @@
 package com.midasit.hdot.ssechatapi.service;
 
-import ai.djl.ModelException;
 import ai.djl.huggingface.tokenizers.Encoding;
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
-import ai.djl.inference.Predictor;
-import ai.djl.repository.zoo.Criteria;
-import ai.djl.repository.zoo.ModelZoo;
-import ai.djl.repository.zoo.ZooModel;
-import ai.djl.training.util.ProgressBar;
-import ai.djl.translate.TranslateException;
 import ai.onnxruntime.OnnxTensor;
-import ai.onnxruntime.OnnxValue;
 import ai.onnxruntime.OrtEnvironment;
 import ai.onnxruntime.OrtSession;
 import jakarta.annotation.PostConstruct;
@@ -18,10 +10,8 @@ import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.io.IOException;
 import java.nio.LongBuffer;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.*;
 
 @Service

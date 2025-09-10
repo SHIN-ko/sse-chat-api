@@ -31,5 +31,9 @@ app:
     endpoint: http://localhost:8001
     region: ap-northeast-2   # 로컬에선 의미 없음. 아무 리전이나 OK.
     table: rag_raw_docs
+  reranker:
+    onnx:
+      model: models/ms-marco-MiniLM-L-6-v2
+      max-length: 256
 aws:
   region: ap-northeast-2
